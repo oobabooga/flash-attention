@@ -30,6 +30,42 @@ contains a partial list of places where FlashAttention is being used.
 FlashAttention and FlashAttention-2 are free to use and modify (see LICENSE).
 Please cite and credit FlashAttention if you use it.
 
+
+## FlashAttention-3 beta release
+FlashAttention-3 is optimized for Hopper GPUs (e.g. H100). 
+
+Blogpost: https://tridao.me/blog/2024/flash3/
+
+Paper: https://tridao.me/publications/flash3/flash3.pdf
+
+![FlashAttention-3 speedup on H100 80GB SXM5 with FP16](assets/flash3_fp16_fwd.png)
+
+This is a beta release for testing / benchmarking before we integrate that with
+the rest of the repo.
+
+Currently released:
+- FP16 forward and backward
+
+Coming soon in the next couple of days / next week:
+- BF16
+- Variable length (FP16, BF16)
+- FP8 forward.
+
+Requirements: H100 / H800 GPU, CUDA >= 12.3.
+
+To install:
+```sh
+cd hopper
+python setup.py install
+```
+To run the test:
+```sh
+export PYTHONPATH=$PWD
+pytest -q -s test_flash_attn.py
+```
+
+
+
 ## Installation and features
 
 Requirements:
@@ -321,7 +357,7 @@ Thanks to @beginlner for this contribution.
 ### 2.6: Softcapping.
 
 Support attention with softcapping, as used in Gemma-2 and Grok models.
-Thanks to @Narsil for this contribution.
+Thanks to @Narsil and @lucidrains for this contribution.
 
 ## Performance
 
@@ -402,6 +438,33 @@ This new release of FlashAttention-2 has been tested on several GPT-style
 models, mostly on A100 GPUs.
 
 If you encounter bugs, please open a GitHub Issue!
+## AMD GPU/ROCm Support
+ROCm version use [composable_kernel](https://github.com/ROCm/composable_kernel) as backend. It provides the implementation of FlashAttention-2.
+
+## Installation and features
+Requirements:
+- ROCm 6.0+
+- PyTorch 1.12.1+
+
+We recommend the
+[Pytorch](https://hub.docker.com/r/rocm/pytorch)
+container from ROCm, which has all the required tools to install FlashAttention.
+
+To compile from source:
+```sh
+python setup.py install
+```
+
+FlashAttention-2 on ROCm currently supports:
+1. MI200 or MI300 GPUs.
+2. Datatype fp16 and bf16
+3. Forward's head dimensions up to 256. Backward head dimensions up to 128.
+
+## Tests
+To run the tests:
+```sh
+pytest tests/test_flash_attn_ck.py
+```
 
 ## Citation
 If you use this codebase, or otherwise found our work valuable, please cite:
