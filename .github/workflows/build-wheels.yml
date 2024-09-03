@@ -24,10 +24,11 @@ jobs:
     name: Build wheels for Python ${{ matrix.pyver }}, CUDA ${{ matrix.cuda }}, and Torch ${{ matrix.torchver }}
     runs-on: windows-2022
     strategy:
+      fail-fast: false
       matrix:
         pyver: ["3.10", "3.11"]
         cuda: ["12.2.2"]
-        torchver: ["2.2.2", "2.3.1"]
+        torchver: ["2.2.2", "2.3.1", "2.4.0"]
     defaults:
       run:
         shell: pwsh
@@ -37,8 +38,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
+        #with:
+        #  submodules: 'recursive'
 
       - uses: actions/setup-python@v4
         with:
@@ -61,11 +62,12 @@ jobs:
 
       - name: Install Dependencies
         run: |
+          $env:MAMBA_NO_LOW_SPEED_LIMIT = 1
           $cudaVersion = '${{ matrix.cuda }}'
           $cudaVersionPytorch = '${{ matrix.cuda }}'.Remove('${{ matrix.cuda }}'.LastIndexOf('.')).Replace('.','')
 
           mamba install -y -c nvidia/label/cuda-$cudaVersion cuda-toolkit cuda-runtime
-          if (!(mamba list cuda)[-1].contains('cuda')) {sleep -s 10; mamba install -y 'cuda' $cudaChannels.TrimEnd().Split()}
+          if (!(mamba list cuda)[-1].contains('cuda')) {sleep -s 10; mamba install -y 'cuda' $cudaVersion}
           if (!(mamba list cuda)[-1].contains('cuda')) {throw 'CUDA Toolkit failed to install!'}
           
           python -m pip install --upgrade build setuptools wheel packaging ninja torch==${{ matrix.torchver }} psutil --extra-index-url "https://download.pytorch.org/whl/cu121"
@@ -88,9 +90,10 @@ jobs:
           
           $env:MAX_JOBS = '1'
           $env:FLASH_ATTENTION_FORCE_BUILD = 'TRUE'
-          $env:FLASH_ATTENTION_FORCE_SINGLE_THREAD = 'TRUE'
-          
-          python -m build -n --wheel
+          $env:FLASH_ATTENTION_FORCE_CXX11_ABI = 'FALSE'
+          $env:BUILD_TARGET = "cuda"
+
+          python setup.py bdist_wheel --dist-dir=dist
           
           $wheel = (gi '.\dist\*.whl')[0]
           $wheelname = $wheel.name.replace("flash_attn-$packageVersion-","flash_attn-$packageVersion+cu$cudaVersion"+"torch${{ matrix.torchver }}cxx11abiFALSE-")
