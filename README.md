@@ -1,4 +1,4 @@
-# Windows compilation workflow by [jlllll](https://github.com/jllllll/flash-attention), with changes by [bdashore3](https://github.com/bdashore3/flash-attention)
+# Windows compilation workflow by [jllllll](https://github.com/jllllll/flash-attention), with changes by [bdashore3](https://github.com/bdashore3/flash-attention)
 
 ----
 # FlashAttention
