@@ -1,5 +1,4 @@
-This fork does not contain any modified code and is only used to host Windows-compatible builds of flash-attention and workflows.  
-Please see releases for downloads.
+# Windows compilation workflow by [jlllll](https://github.com/jllllll/flash-attention), with changes by [bdashore3](https://github.com/bdashore3/flash-attention)
 
 ----
 # FlashAttention
