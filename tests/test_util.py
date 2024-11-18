@@ -5,16 +5,23 @@ from einops import rearrange, repeat
 from flash_attn.bert_padding import pad_input, unpad_input
 
 
-def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
+def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random", zero_lengths=False):
     assert mode in ["full", "random", "third"]
     if mode == "full":
         lengths = torch.full((batch_size, 1), max_seqlen, device=device, dtype=torch.int32)
     elif mode == "random":
         lengths = torch.randint(
-            max(1, max_seqlen - 20), max_seqlen + 1, (batch_size, 1), device=device
+            max(0 if zero_lengths else 1, max_seqlen - 20), max_seqlen + 1, (batch_size, 1), device=device
         )
     elif mode == "third":
         lengths = torch.randint(max_seqlen // 3, max_seqlen + 1, (batch_size, 1), device=device)
+
+    if zero_lengths:
+        # Generate zero-lengths every 5 batches and the last batch.
+        for i in range(batch_size):
+            if i % 5 == 0:
+                lengths[i] = 0
+        lengths[-1] = 0
     padding_mask = (
         repeat(torch.arange(max_seqlen, device=device), "s -> b s", b=batch_size) < lengths
     )
@@ -22,7 +29,9 @@ def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
 
 
 def generate_qkv(
-    q, k, v, query_padding_mask=None, key_padding_mask=None, kvpacked=False, qkvpacked=False
+    q, k, v, query_padding_mask=None, key_padding_mask=None, 
+    kvpacked=False, qkvpacked=False, add_unused_qkv=False,
+    query_unused_mask=None, key_unused_mask=None,
 ):
     """
     Arguments:
@@ -37,9 +46,14 @@ def generate_qkv(
     _, seqlen_k, nheads_k, _ = k.shape
     assert k.shape == (batch_size, seqlen_k, nheads_k, d)
     assert v.shape == (batch_size, seqlen_k, nheads_k, d)
+    if query_unused_mask is not None or key_unused_mask is not None:
+        assert not kvpacked
+        assert not qkvpacked
 
     if query_padding_mask is not None:
-        q_unpad, indices_q, cu_seqlens_q, max_seqlen_q = unpad_input(q, query_padding_mask)
+        q_unpad, indices_q, cu_seqlens_q, max_seqlen_q, seqused_q = unpad_input(
+            q, query_padding_mask, query_unused_mask,
+        )
         output_pad_fn = lambda output_unpad: pad_input(
             output_unpad, indices_q, batch_size, seqlen_q
         )
@@ -48,20 +62,22 @@ def generate_qkv(
         cu_seqlens_q = torch.arange(
             0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32, device=q_unpad.device
         )
+        seqused_q = None
         max_seqlen_q = seqlen_q
         output_pad_fn = lambda output_unpad: rearrange(
             output_unpad, "(b s) h d -> b s h d", b=batch_size
         )
 
     if key_padding_mask is not None:
-        k_unpad, indices_k, cu_seqlens_k, max_seqlen_k = unpad_input(k, key_padding_mask)
-        v_unpad, _, _, _ = unpad_input(v, key_padding_mask)
+        k_unpad, indices_k, cu_seqlens_k, max_seqlen_k, seqused_k = unpad_input(k, key_padding_mask, key_unused_mask)
+        v_unpad, _, _, _, _ = unpad_input(v, key_padding_mask, key_unused_mask)
     else:
         k_unpad = rearrange(k, "b s h d -> (b s) h d")
         v_unpad = rearrange(v, "b s h d -> (b s) h d")
         cu_seqlens_k = torch.arange(
             0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32, device=k_unpad.device
         )
+        seqused_k = None
         max_seqlen_k = seqlen_k
 
     if qkvpacked:
@@ -118,6 +134,8 @@ def generate_qkv(
             v_unpad.detach().requires_grad_(),
             cu_seqlens_q,
             cu_seqlens_k,
+            seqused_q,
+            seqused_k,
             max_seqlen_q,
             max_seqlen_k,
             q.detach().requires_grad_(),
@@ -251,4 +269,6 @@ def attention_ref(
     output = torch.einsum("bhts,bshd->bthd", attention_drop, v * dropout_scaling)
     if query_padding_mask is not None:
         output.masked_fill_(rearrange(~query_padding_mask, "b s -> b s 1 1"), 0.0)
+    if key_padding_mask is not None:
+        output.masked_fill_(rearrange(torch.logical_not(torch.any(key_padding_mask, 1)), "b -> b 1 1 1"), 0.0)
     return output.to(dtype=dtype_og), attention.to(dtype=dtype_og)

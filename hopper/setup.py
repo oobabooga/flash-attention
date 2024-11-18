@@ -117,9 +117,60 @@ if not SKIP_CUDA_BUILD:
         "flash_fwd_hdim256_fp16_sm90.cu",
         "flash_fwd_hdim256_bf16_sm90.cu",
         "flash_bwd_hdim64_fp16_sm90.cu",
+        "flash_bwd_hdim96_fp16_sm90.cu",
         "flash_bwd_hdim128_fp16_sm90.cu",
-        "flash_bwd_hdim256_fp16_sm90.cu",
-        # "flash_fwd_hdim128_e4m3_sm90.cu",
+        # "flash_bwd_hdim256_fp16_sm90.cu",
+        "flash_bwd_hdim64_bf16_sm90.cu",
+        "flash_bwd_hdim96_bf16_sm90.cu",
+        "flash_bwd_hdim128_bf16_sm90.cu",
+        "flash_fwd_hdim64_e4m3_sm90.cu",
+        "flash_fwd_hdim128_e4m3_sm90.cu",
+        "flash_fwd_hdim256_e4m3_sm90.cu",
+        "flash_fwd_hdim64_fp16_gqa2_sm90.cu",
+        "flash_fwd_hdim64_fp16_gqa4_sm90.cu",
+        "flash_fwd_hdim64_fp16_gqa8_sm90.cu",
+        "flash_fwd_hdim64_fp16_gqa16_sm90.cu",
+        "flash_fwd_hdim64_fp16_gqa32_sm90.cu",
+        "flash_fwd_hdim128_fp16_gqa2_sm90.cu",
+        "flash_fwd_hdim128_fp16_gqa4_sm90.cu",
+        "flash_fwd_hdim128_fp16_gqa8_sm90.cu",
+        "flash_fwd_hdim128_fp16_gqa16_sm90.cu",
+        "flash_fwd_hdim128_fp16_gqa32_sm90.cu",
+        "flash_fwd_hdim256_fp16_gqa2_sm90.cu",
+        "flash_fwd_hdim256_fp16_gqa4_sm90.cu",
+        "flash_fwd_hdim256_fp16_gqa8_sm90.cu",
+        "flash_fwd_hdim256_fp16_gqa16_sm90.cu",
+        "flash_fwd_hdim256_fp16_gqa32_sm90.cu",
+        "flash_fwd_hdim64_bf16_gqa2_sm90.cu",
+        "flash_fwd_hdim64_bf16_gqa4_sm90.cu",
+        "flash_fwd_hdim64_bf16_gqa8_sm90.cu",
+        "flash_fwd_hdim64_bf16_gqa16_sm90.cu",
+        "flash_fwd_hdim64_bf16_gqa32_sm90.cu",
+        "flash_fwd_hdim128_bf16_gqa2_sm90.cu",
+        "flash_fwd_hdim128_bf16_gqa4_sm90.cu",
+        "flash_fwd_hdim128_bf16_gqa8_sm90.cu",
+        "flash_fwd_hdim128_bf16_gqa16_sm90.cu",
+        "flash_fwd_hdim128_bf16_gqa32_sm90.cu",
+        "flash_fwd_hdim256_bf16_gqa2_sm90.cu",
+        "flash_fwd_hdim256_bf16_gqa4_sm90.cu",
+        "flash_fwd_hdim256_bf16_gqa8_sm90.cu",
+        "flash_fwd_hdim256_bf16_gqa16_sm90.cu",
+        "flash_fwd_hdim256_bf16_gqa32_sm90.cu",
+        "flash_fwd_hdim64_e4m3_gqa2_sm90.cu",
+        "flash_fwd_hdim64_e4m3_gqa4_sm90.cu",
+        "flash_fwd_hdim64_e4m3_gqa8_sm90.cu",
+        "flash_fwd_hdim64_e4m3_gqa16_sm90.cu",
+        "flash_fwd_hdim64_e4m3_gqa32_sm90.cu",
+        "flash_fwd_hdim128_e4m3_gqa2_sm90.cu",
+        "flash_fwd_hdim128_e4m3_gqa4_sm90.cu",
+        "flash_fwd_hdim128_e4m3_gqa8_sm90.cu",
+        "flash_fwd_hdim128_e4m3_gqa16_sm90.cu",
+        "flash_fwd_hdim128_e4m3_gqa32_sm90.cu",
+        "flash_fwd_hdim256_e4m3_gqa2_sm90.cu",
+        "flash_fwd_hdim256_e4m3_gqa4_sm90.cu",
+        "flash_fwd_hdim256_e4m3_gqa8_sm90.cu",
+        "flash_fwd_hdim256_e4m3_gqa16_sm90.cu",
+        "flash_fwd_hdim256_e4m3_gqa32_sm90.cu",
     ]
     nvcc_flags = [
         "-O3",
@@ -134,16 +185,19 @@ if not SKIP_CUDA_BUILD:
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
         "--use_fast_math",
-        # "--ptxas-options=-v",  # printing out number of registers
+        "--ptxas-options=-v",  # printing out number of registers
         "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage",  # printing out number of registers
         "-lineinfo",
         "-DCUTLASS_DEBUG_TRACE_LEVEL=0",  # Can toggle for debugging
         "-DNDEBUG",  # Important, otherwise performance is severely impacted
-        "-DQBLKSIZE=128",
-        "-DKBLKSIZE=128",
-        "-DCTA256",
-        "-DDQINRMEM",
     ]
+    if get_platform() == "win_amd64":
+        nvcc_flags.extend(
+            [
+                "-D_USE_MATH_DEFINES",  # for M_LN2
+                "-Xcompiler=/Zc:__cplusplus",  # sets __cplusplus correctly, CUTLASS_CONSTEXPR_IF_CXX17 needed for cutlass::gcd
+            ]
+        )
     include_dirs = [
         # Path(this_dir) / "fmha-pipeline",
         # repo_dir / "lib",
@@ -161,7 +215,7 @@ if not SKIP_CUDA_BUILD:
                 "cxx": ["-O3", "-std=c++17"],
                 # "cxx": ["-O0", "-std=c++17"],
                 "nvcc": append_nvcc_threads(
-                    nvcc_flags + ["-DEXECMODE=0"] + cc_flag
+                    nvcc_flags + cc_flag
                 ),
             },
             include_dirs=include_dirs,

@@ -47,8 +47,7 @@ fmha_fwd_args get_ck_fmha_varlen_fwd_args(bool has_lse,
                                           at::Tensor dropout_randval,
                                           float softmax_scale,
                                           float p_dropout,
-                                          uint64_t drop_seed,
-                                          uint64_t drop_offset)
+                                          std::pair<uint64_t*, uint64_t*> drop_seed_offset)
 {
     // q: (total_q, nheads, d)
     // k: (total_k, nheads_k, d)
@@ -56,7 +55,7 @@ fmha_fwd_args get_ck_fmha_varlen_fwd_args(bool has_lse,
     // o: (total_q, nheads, d)
 
     // alibi_slopes:(batch, nheads) or (nhead)
-    // lse: (batch, nheads, max_seqlen_q)
+    // lse: (nheads, total_q)
     // randval: (nheads, total_q, max_seqlen_k)
 
     ck_tile::index_t total_q = q.size(0);
@@ -72,15 +71,14 @@ fmha_fwd_args get_ck_fmha_varlen_fwd_args(bool has_lse,
     ck_tile::index_t nhead_stride_k = k.stride(1);
     ck_tile::index_t nhead_stride_v = v.stride(1);
     ck_tile::index_t nhead_stride_o = out.stride(1);
-    ck_tile::index_t nhead_stride_lse = has_lse ? softmax_lse.stride(1) : 0;
+    ck_tile::index_t nhead_stride_lse = has_lse ? softmax_lse.stride(0) : 0;
     ck_tile::index_t nhead_stride_randval = has_dropout_randval ? dropout_randval.stride(0) : 0;
 
     ck_tile::index_t batch_stride_q = 0;
     ck_tile::index_t batch_stride_k = 0;
     ck_tile::index_t batch_stride_v = 0;
     ck_tile::index_t batch_stride_o = 0;
-
-    ck_tile::index_t batch_stride_lse = has_lse ? softmax_lse.stride(0) : 0;
+    ck_tile::index_t batch_stride_lse = 0;
     ck_tile::index_t batch_stride_randval = 0;
 
     void *alibi_slopes_ptr = nullptr;
@@ -100,8 +98,6 @@ fmha_fwd_args get_ck_fmha_varlen_fwd_args(bool has_lse,
                          v.data_ptr(),
                          alibi_slopes_ptr, // bias
                          has_dropout_randval ? dropout_randval.data_ptr() : nullptr,
-                         nullptr, // lse_acc
-                         nullptr, // o_acc
                          has_lse ? softmax_lse.data_ptr() : nullptr,
                          out.data_ptr(),
                          seqlens_q.data_ptr(), // seqstart_q
@@ -115,7 +111,6 @@ fmha_fwd_args get_ck_fmha_varlen_fwd_args(bool has_lse,
                          d,             // hdim_v
                          h,             // nhead
                          h_k,           // nhead_k
-                         1,             // num_splits
                          softmax_scale, // scale_s
                          1,             // scale_p
                          1,             // scale_o
@@ -124,7 +119,6 @@ fmha_fwd_args get_ck_fmha_varlen_fwd_args(bool has_lse,
                          stride_v,
                          stride_alibi_slopes,
                          stride_randval,
-                         0, // stride_o_acc,
                          stride_o,
                          nhead_stride_q,
                          nhead_stride_k,
@@ -132,8 +126,6 @@ fmha_fwd_args get_ck_fmha_varlen_fwd_args(bool has_lse,
                          0, // nhead_stride_bias, FA without bias
                          nhead_stride_randval,
                          nhead_stride_lse,
-                         0, // nhead_stride_lse_acc
-                         0, // nhead_stride_o_acc
                          nhead_stride_o,
                          batch_stride_q,
                          batch_stride_k,
@@ -141,17 +133,13 @@ fmha_fwd_args get_ck_fmha_varlen_fwd_args(bool has_lse,
                          0, // batch_stride_bias, FA without bias
                          batch_stride_randval,
                          batch_stride_lse,
-                         0, // batch_stride_lse_acc
-                         0, // batch_stride_o_acc
                          batch_stride_o,
-                         0, // split_stride_lse_acc
-                         0, // split_stride_o_acc
                          mask.left,
                          mask.right,
                          static_cast<ck_tile::index_t>(mask.type),
                          p_dropout,
                          has_dropout_randval,
-                         {drop_seed, drop_offset}};
+                         drop_seed_offset};
 }
 
 std::vector<at::Tensor>
@@ -206,7 +194,7 @@ mha_varlen_fwd(at::Tensor &q,                   // total_q x num_heads x head_si
 
     const int batch_size = cu_seqlens_q.numel() - 1;
     int num_heads = sizes[1];
-    const int head_size_og = sizes[2];
+    const int head_size = sizes[2];
     const int num_heads_k = k.size(1);
 
     const int max_num_blocks_per_seq = 0;
@@ -222,7 +210,8 @@ mha_varlen_fwd(at::Tensor &q,                   // total_q x num_heads x head_si
     const int total_k = k.size(0);
 
     TORCH_CHECK(batch_size > 0, "batch size must be postive");
-    TORCH_CHECK(head_size_og <= 256, "CK only supports head dimension at most 256");
+    TORCH_CHECK(head_size <= 256, "CK only supports head dimension at most 256");
+    TORCH_CHECK(head_size % 8 == 0, "query, key, value, and out_ must have a head_size that is a multiple of 8");
     TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
 
     if (window_size_left >= max_seqlen_k) { window_size_left = -1; }
@@ -245,23 +234,11 @@ mha_varlen_fwd(at::Tensor &q,                   // total_q x num_heads x head_si
         mask = mask_info::decode(mask_identify, max_seqlen_q, max_seqlen_k); // local
     }
 
-    CHECK_SHAPE(q, total_q, num_heads, head_size_og);
-    CHECK_SHAPE(k, total_k, num_heads_k, head_size_og);
-    CHECK_SHAPE(v, total_k, num_heads_k, head_size_og);
+    CHECK_SHAPE(q, total_q, num_heads, head_size);
+    CHECK_SHAPE(k, total_k, num_heads_k, head_size);
+    CHECK_SHAPE(v, total_k, num_heads_k, head_size);
     CHECK_SHAPE(cu_seqlens_q, batch_size + 1);
     CHECK_SHAPE(cu_seqlens_k, batch_size + 1);
-
-    at::Tensor q_padded, k_padded, v_padded;
-    if (head_size_og % 8 != 0) {
-        q_padded = torch::nn::functional::pad(q, torch::nn::functional::PadFuncOptions({0, 8 - head_size_og % 8}));
-        k_padded = torch::nn::functional::pad(k, torch::nn::functional::PadFuncOptions({0, 8 - head_size_og % 8}));
-        v_padded = torch::nn::functional::pad(v, torch::nn::functional::PadFuncOptions({0, 8 - head_size_og % 8}));
-    }
-    else {
-        q_padded = q;
-        k_padded = k;
-        v_padded = v;
-    }
 
     at::Tensor out;
     if (out_.has_value()) {
@@ -269,16 +246,11 @@ mha_varlen_fwd(at::Tensor &q,                   // total_q x num_heads x head_si
         TORCH_CHECK(out.dtype() == q_dtype, "Output must have the same dtype as inputs");
         CHECK_DEVICE(out);
         TORCH_CHECK(out.stride(-1) == 1, "Output tensor must have contiguous last dimension");
-        CHECK_SHAPE(out, total_q, num_heads, head_size_og);
-
-        if (head_size_og % 8 != 0) { out = torch::empty_like(q_padded); }
+        CHECK_SHAPE(out, total_q, num_heads, head_size);
     }
     else {
-        out = torch::empty_like(q_padded);
+        out = torch::empty_like(q);
     }
-
-    auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
-    const int head_size_8x = round_multiple(head_size_og, 8);
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
@@ -290,12 +262,15 @@ mha_varlen_fwd(at::Tensor &q,                   // total_q x num_heads x head_si
 
     at::Tensor softmax_lse;
     // TODO - check gradient, only training require lse
-    softmax_lse = torch::empty({batch_size, num_heads, max_seqlen_q}, opts.dtype(torch::kFloat32));
+    softmax_lse = torch::empty({num_heads, total_q}, opts.dtype(torch::kFloat32));
 
     at::Tensor p;
     if (return_dropout_randval) {
         TORCH_CHECK(has_dropout, "return_dropout_randval require p_dropout > 0");
         p = torch::empty({num_heads, total_q, max_seqlen_k}, opts.dtype(torch::kUInt8));
+    }
+    else {
+        p = torch::empty({ 0 }, opts);
     }
 
     if (zero_tensors)
@@ -305,10 +280,9 @@ mha_varlen_fwd(at::Tensor &q,                   // total_q x num_heads x head_si
         if (return_dropout_randval) {p.zero_();}
     }
 
-    uint64_t drop_seed = 1, drop_offset = 0;
     int64_t counter_offset = batch_size * num_heads * ck_tile::get_warp_size();
-    auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-    auto rng_state = torch::empty({2}, options.dtype(torch::kInt64));
+    auto rng_state = torch::empty({2}, opts.dtype(torch::kInt64));
+    auto rng_state_ptr = reinterpret_cast<uint64_t*>(rng_state.data_ptr());
 
     if (p_dropout > 0.0)  {
         auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
@@ -316,18 +290,23 @@ mha_varlen_fwd(at::Tensor &q,                   // total_q x num_heads x head_si
         // See Note [Acquire lock when using random generators]
         std::lock_guard<std::mutex> lock(gen->mutex_);
         auto philox_args = gen->philox_cuda_state(counter_offset);
-        std::tie(drop_seed, drop_offset) = flash::unpack(philox_args);
+        hipLaunchKernelGGL(
+            flash::ParsePhiloxCudaState, dim3(1), dim3(64), 0, 0, philox_args, rng_state_ptr);
     }
 
-    rng_state[0] = *(reinterpret_cast<int64_t*>(&drop_seed));
-    rng_state[1] = *(reinterpret_cast<int64_t*>(&drop_offset));
-
     if (max_seqlen_k > 0) {
+        auto drop_seed_offset = std::make_pair(rng_state_ptr, rng_state_ptr + 1);
         auto stream = at::cuda::getCurrentHIPStream().stream();
         ck_tile::stream_config stream_config{stream};
 
         auto traits =
-            get_ck_fmha_varlen_fwd_traits(mask, q_dtype_str, head_size_8x, has_dropout, has_lse, alibi_slopes_.has_value());
+            get_ck_fmha_varlen_fwd_traits(
+                mask,
+                q_dtype_str,
+                head_size,
+                has_dropout,
+                has_lse,
+                alibi_slopes_.has_value());
 
         auto args =
             get_ck_fmha_varlen_fwd_args(
@@ -338,10 +317,10 @@ mha_varlen_fwd(at::Tensor &q,                   // total_q x num_heads x head_si
                 max_seqlen_q,
                 num_heads,
                 num_heads_k,
-                head_size_8x,
-                q_padded,
-                k_padded,
-                v_padded,
+                head_size,
+                q,
+                k,
+                v,
                 cu_seqlens_q,
                 cu_seqlens_k,
                 alibi_slopes_,
@@ -350,10 +329,10 @@ mha_varlen_fwd(at::Tensor &q,                   // total_q x num_heads x head_si
                 p,
                 softmax_scale,
                 p_dropout,
-                drop_seed,
-                drop_offset);
+                drop_seed_offset);
 
-        fmha_fwd(traits, args, stream_config);
+        float t = fmha_fwd(traits, args, stream_config);
+        TORCH_CHECK(t >= 0, "invalid argument for fmha_fwd");
     }
     else {
         // If seqlen_k == 0, then we have an empty tensor. We need to set the output to 0.
@@ -361,11 +340,5 @@ mha_varlen_fwd(at::Tensor &q,                   // total_q x num_heads x head_si
         softmax_lse.fill_(std::numeric_limits<float>::infinity());
     }
 
-    at::Tensor out_padded = out;
-    if (head_size_og % 8 != 0) {
-        out = out.index({"...", torch::indexing::Slice(torch::indexing::None, head_size_og)});
-        if (out_.has_value()) { out_.value().copy_(out); }
-    }
-
-    return {out, q_padded, k_padded, v_padded, out_padded, softmax_lse, p, rng_state};
+    return {out, softmax_lse, p, rng_state};
 }
