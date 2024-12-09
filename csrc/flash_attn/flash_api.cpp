@@ -5,11 +5,14 @@
 // Include these 2 headers instead of torch/extension.h since we don't need all of the torch headers.
 #include <torch/python.h>
 #include <torch/nn/functional.h>
-#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
+#include <ATen/cuda/CUDAGeneratorImpl.h>  // For at::Generator and at::PhiloxCudaState
+#include "philox_unpack.cuh"  // For at::cuda::philox::unpack
 
 #include <cutlass/numeric_types.h>
 
+#include "hardware_info.h"
 #include "flash.h"
 #include "static_switch.h"
 
@@ -294,7 +297,7 @@ inline int num_splits_heuristic(int batch_nheads_mblocks, int num_SMs, int num_n
 std::tuple<at::Tensor, at::Tensor> set_params_splitkv(Flash_fwd_params &params, const int batch_size,
     const int num_heads, const int head_size, const int max_seqlen_k, const int max_seqlen_q,
     const int head_size_rounded, const float p_dropout,
-    const int num_splits, cudaDeviceProp *dprops, struct c10::TensorOptions opts) {
+    const int num_splits, const int num_sm, struct c10::TensorOptions opts) {
 
     // This needs to match with run_mha_fwd_splitkv_dispatch
     const int block_n = head_size <= 64 ? 256 : (head_size <= 128 ? 128 : 64);
@@ -309,7 +312,7 @@ std::tuple<at::Tensor, at::Tensor> set_params_splitkv(Flash_fwd_params &params, 
     if (p_dropout == 0.0f) {  // SplitKV is not implemented for dropout
         if (num_splits < 1) {
             // We multiply number of SMs by 2 to hard-code the fact that we're using 128 threads per block.
-            params.num_splits = num_splits_heuristic(batch_size * num_heads * num_m_blocks, dprops->multiProcessorCount * 2, num_n_blocks, 128);
+            params.num_splits = num_splits_heuristic(batch_size * num_heads * num_m_blocks, num_sm * 2, num_n_blocks, 128);
         }
         if (params.num_splits > 1) {
             softmax_lse_accum = torch::empty({params.num_splits, batch_size, num_heads, max_seqlen_q}, opts.dtype(at::kFloat));
@@ -357,10 +360,13 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x round_mult
         const bool return_softmax,
         c10::optional<at::Generator> gen_) {
 
-    auto dprops = at::cuda::getCurrentDeviceProperties();
-    // bool is_sm75 = dprops->major == 7 && dprops->minor == 5;
-    bool is_sm8x = dprops->major == 8 && dprops->minor >= 0;
-    bool is_sm90 = dprops->major == 9 && dprops->minor == 0;
+    // Otherwise the kernel will be launched from cuda:0 device
+    at::cuda::CUDAGuard device_guard{q.device()};
+
+    auto [cc_major, cc_minor] = get_compute_capability(get_current_device());
+    // bool is_sm75 = cc_major == 7 && cc_minor == 5;
+    bool is_sm8x = cc_major == 8 && cc_minor >= 0;
+    bool is_sm90 = cc_major == 9 && cc_minor == 0;
     TORCH_CHECK(is_sm90 || is_sm8x, "FlashAttention only supports Ampere GPUs or newer.");
     // We will support Turing in the near future
     // TORCH_CHECK(is_sm90 || is_sm8x || is_sm75, "FlashAttention only supports Turing GPUs or newer.");
@@ -435,10 +441,6 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x round_mult
     const int seqlen_q_rounded = round_multiple(seqlen_q, 128);
     const int seqlen_k_rounded = round_multiple(seqlen_k, 128);
 
-    // Otherwise the kernel will be launched from cuda:0 device
-    // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)q.get_device()};
-
     auto opts = q.options();
 
     auto softmax_lse = torch::empty({batch_size, num_heads, seqlen_q}, opts.dtype(at::kFloat));
@@ -476,7 +478,7 @@ mha_fwd(at::Tensor &q,         // batch_size x seqlen_q x num_heads x round_mult
     at::Tensor softmax_lse_accum, out_accum;
     std::tie(softmax_lse_accum, out_accum) = set_params_splitkv(
         params, batch_size, num_heads, head_size, seqlen_k, seqlen_q,
-        head_size_rounded, p_dropout, /*num_splits*/ 0, dprops, opts);
+        head_size_rounded, p_dropout, /*num_splits*/ 0, get_num_sm(get_current_device()), opts);
 
     // number of times random will be generated per thread, to offset philox counter in thc random
     // state
@@ -537,10 +539,13 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                const bool return_softmax,
                c10::optional<at::Generator> gen_) {
 
-    auto dprops = at::cuda::getCurrentDeviceProperties();
-    // bool is_sm75 = dprops->major == 7 && dprops->minor == 5;
-    bool is_sm8x = dprops->major == 8 && dprops->minor >= 0;
-    bool is_sm90 = dprops->major == 9 && dprops->minor == 0;
+    // Otherwise the kernel will be launched from cuda:0 device
+    at::cuda::CUDAGuard device_guard{q.device()};
+
+    auto [cc_major, cc_minor] = get_compute_capability(get_current_device());
+    // bool is_sm75 = cc_major == 7 && cc_minor == 5;
+    bool is_sm8x = cc_major == 8 && cc_minor >= 0;
+    bool is_sm90 = cc_major == 9 && cc_minor == 0;
     TORCH_CHECK(is_sm90 || is_sm8x, "FlashAttention only supports Ampere GPUs or newer.");
     // We will support Turing in the near future
     // TORCH_CHECK(is_sm90 || is_sm8x || is_sm75, "FlashAttention only supports Turing GPUs or newer.");
@@ -655,10 +660,6 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     const int seqlen_q_rounded = round_multiple(max_seqlen_q, 128);
     const int seqlen_k_rounded = round_multiple(max_seqlen_k, 128);
 
-    // Otherwise the kernel will be launched from cuda:0 device
-    // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)q.get_device()};
-
     auto opts = q.options();
     auto softmax_lse = torch::empty({num_heads, total_q}, opts.dtype(at::kFloat));
     at::Tensor p;
@@ -713,7 +714,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         std::tie(softmax_lse_accum, out_accum) =
             set_params_splitkv(params, batch_size, num_heads, head_size,
                                max_seqlen_k, max_seqlen_q, head_size_rounded,
-                               p_dropout, /*num_splits*/ 0, dprops, opts);
+                               p_dropout, /*num_splits*/ 0, get_num_sm(get_current_device()), opts);
     }
 
     if (leftpad_k_.has_value()) {
@@ -800,11 +801,15 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x multipl
         TORCH_CHECK(false, "This flash attention build does not support backward.");
     #endif
     if (is_causal) { window_size_right = 0; }
-    auto dprops = at::cuda::getCurrentDeviceProperties();
-    // bool is_sm75 = dprops->major == 7 && dprops->minor == 5;
-    bool is_sm8x = dprops->major == 8 && dprops->minor >= 0;
-    bool is_sm80 = dprops->major == 8 && dprops->minor == 0;
-    bool is_sm90 = dprops->major == 9 && dprops->minor == 0;
+
+    // Otherwise the kernel will be launched from cuda:0 device
+    at::cuda::CUDAGuard device_guard{q.device()};
+
+    auto [cc_major, cc_minor] = get_compute_capability(get_current_device());
+    // bool is_sm75 = cc_major == 7 && cc_minor == 5;
+    bool is_sm8x = cc_major == 8 && cc_minor >= 0;
+    bool is_sm80 = cc_major == 8 && cc_minor == 0;
+    bool is_sm90 = cc_major == 9 && cc_minor == 0;
     TORCH_CHECK(is_sm90 || is_sm8x, "FlashAttention only supports Ampere GPUs or newer.");
     // We will support Turing in the near future
     // TORCH_CHECK(is_sm90 || is_sm8x || is_sm75, "FlashAttention only supports Turing GPUs or newer.");
@@ -897,10 +902,6 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x multipl
     // TODO: change later, for now set to true for simplicity
     bool loop = true;
 
-    // Otherwise the kernel will be launched from cuda:0 device
-    // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)q.get_device()};
-
     auto opts = q.options();
     auto softmax_d = torch::empty({batch_size, num_heads, seqlen_q_rounded}, opts.dtype(at::kFloat));
     at::Tensor dq_accum;
@@ -909,7 +910,7 @@ mha_bwd(const at::Tensor &dout,  // batch_size x seqlen_q x num_heads, x multipl
         if (!deterministic) {
             dq_accum = torch::empty({batch_size, seqlen_q_rounded, num_heads, head_size_rounded}, opts.dtype(at::kFloat));
         } else {
-            const int nsplits = (dprops->multiProcessorCount + batch_size * num_heads - 1) / (batch_size * num_heads);
+            const int nsplits = (get_num_sm(get_current_device()) + batch_size * num_heads - 1) / (batch_size * num_heads);
             dq_accum = torch::zeros({nsplits, batch_size, seqlen_q_rounded, num_heads, head_size_rounded}, opts.dtype(at::kFloat));
         }
         // dk_accum = torch::empty({batch_size, num_heads_k, seqlen_k_rounded, head_size_rounded}, opts.dtype(at::kFloat));
@@ -1021,13 +1022,16 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
     #ifdef FLASHATTENTION_DISABLE_BACKWARD
         TORCH_CHECK(false, "This flash attention build does not support backward.");
     #endif
-
     if (is_causal) { window_size_right = 0; }
-    auto dprops = at::cuda::getCurrentDeviceProperties();
-    // bool is_sm75 = dprops->major == 7 && dprops->minor == 5;
-    bool is_sm8x = dprops->major == 8 && dprops->minor >= 0;
-    bool is_sm80 = dprops->major == 8 && dprops->minor == 0;
-    bool is_sm90 = dprops->major == 9 && dprops->minor == 0;
+
+    // Otherwise the kernel will be launched from cuda:0 device
+    at::cuda::CUDAGuard device_guard{q.device()};
+
+    auto [cc_major, cc_minor] = get_compute_capability(get_current_device());
+    // bool is_sm75 = cc_major == 7 && cc_minor == 5;
+    bool is_sm8x = cc_major == 8 && cc_minor >= 0;
+    bool is_sm80 = cc_major == 8 && cc_minor == 0;
+    bool is_sm90 = cc_major == 9 && cc_minor == 0;
     TORCH_CHECK(is_sm90 || is_sm8x, "FlashAttention only supports Ampere GPUs or newer.");
     // We will support Turing in the near future
     // TORCH_CHECK(is_sm90 || is_sm8x || is_sm75, "FlashAttention only supports Turing GPUs or newer.");
@@ -1125,10 +1129,6 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
     // TODO: change later, for now set to true for simplicity
     bool loop = true;
 
-    // Otherwise the kernel will be launched from cuda:0 device
-    // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)q.get_device()};
-
     auto opts = q.options();
     auto softmax_d = torch::empty({num_heads, total_q + 128 * batch_size}, opts.dtype(at::kFloat));
     at::Tensor dq_accum;
@@ -1145,7 +1145,7 @@ mha_varlen_bwd(const at::Tensor &dout,  // total_q x num_heads, x head_size
         if (!deterministic) {
             dq_accum = torch::empty({total_q + 128 * batch_size, num_heads, head_size_rounded}, opts.dtype(at::kFloat));
         } else {
-            const int nsplits = (dprops->multiProcessorCount + batch_size * num_heads - 1) / (batch_size * num_heads);
+            const int nsplits = (get_num_sm(get_current_device()) + batch_size * num_heads - 1) / (batch_size * num_heads);
             dq_accum = torch::zeros({nsplits, total_q + 128 * batch_size, num_heads, head_size_rounded}, opts.dtype(at::kFloat));
         }
     }
@@ -1255,10 +1255,13 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
                 int num_splits
                 ) {
 
-    auto dprops = at::cuda::getCurrentDeviceProperties();
-    // bool is_sm75 = dprops->major == 7 && dprops->minor == 5;
-    bool is_sm8x = dprops->major == 8 && dprops->minor >= 0;
-    bool is_sm90 = dprops->major == 9 && dprops->minor == 0;
+    // Otherwise the kernel will be launched from cuda:0 device
+    at::cuda::CUDAGuard device_guard{q.device()};
+
+    auto [cc_major, cc_minor] = get_compute_capability(get_current_device());
+    // bool is_sm75 = cc_major == 7 && cc_minor == 5;
+    bool is_sm8x = cc_major == 8 && cc_minor >= 0;
+    bool is_sm90 = cc_major == 9 && cc_minor == 0;
     TORCH_CHECK(is_sm90 || is_sm8x, "FlashAttention only supports Ampere GPUs or newer.");
     // We will support Turing in the near future
     // TORCH_CHECK(is_sm90 || is_sm8x || is_sm75, "FlashAttention only supports Turing GPUs or newer.");
@@ -1361,10 +1364,6 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     const int head_size_rounded = head_size <= 192 ? round_multiple(head_size, 32) : 256;
     const int seqlen_q_rounded = round_multiple(seqlen_q, 128);
     const int seqlen_k_rounded = round_multiple(seqlen_k, 128);
-
-    // Otherwise the kernel will be launched from cuda:0 device
-    // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)q.get_device()};
 
     auto opts = q.options();
 
@@ -1476,12 +1475,12 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
         TORCH_CHECK(cache_batch_idx.scalar_type() == torch::kInt32, "cache_batch_idx must have dtype int32");
         params.cache_batch_idx = reinterpret_cast<int *>(cache_batch_idx.data_ptr());
     }
-    
+
     // Keep references to these tensors to extend their lifetime
     at::Tensor softmax_lse_accum, out_accum;
     std::tie(softmax_lse_accum, out_accum) = set_params_splitkv(
         params, batch_size, num_heads, head_size, seqlen_k, seqlen_q,
-        head_size_rounded, /*dropout*/ 0.f, num_splits, dprops, opts);
+        head_size_rounded, /*dropout*/ 0.f, num_splits, get_num_sm(get_current_device()), opts);
 
     if (paged_KV) {
         params.block_table = block_table.data_ptr<int>();
