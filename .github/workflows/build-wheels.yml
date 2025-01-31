@@ -97,7 +97,7 @@ jobs:
           $wheelname = $wheel.name.replace("flash_attn-$packageVersion-","flash_attn-$packageVersion+cu$cudaVersion"+"torch${{ matrix.torchver }}cxx11abiFALSE-")
           Move-Item $wheel.fullname ".\dist\$wheelname"
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: 'windows-wheels'
           path: ./dist/*.whl
