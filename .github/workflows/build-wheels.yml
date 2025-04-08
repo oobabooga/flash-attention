@@ -37,6 +37,10 @@ jobs:
         PCKGVER: ${{ inputs.version }}
 
     steps:
+      - name: Configure Git for long paths
+        run: git config --global core.longpaths true
+        shell: powershell
+
       - uses: actions/checkout@v4
         #with:
         #  submodules: 'recursive'
