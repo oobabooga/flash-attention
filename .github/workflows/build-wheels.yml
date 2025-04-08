@@ -85,6 +85,7 @@ jobs:
           $env:FLASH_ATTENTION_FORCE_BUILD = 'TRUE'
           $env:FLASH_ATTENTION_FORCE_CXX11_ABI = 'FALSE'
           $env:BUILD_TARGET = "cuda"
+          $env:CXXFLAGS = "/std:c++17"
 
           python setup.py bdist_wheel --dist-dir=dist
 
