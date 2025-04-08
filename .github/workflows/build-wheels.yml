@@ -62,7 +62,8 @@ jobs:
           $cudaVersion = '${{ matrix.cuda }}'
           $cudaVersionPytorch = '${{ matrix.cuda }}'.Remove('${{ matrix.cuda }}'.LastIndexOf('.')).Replace('.','')
 
-          uv pip install --upgrade build setuptools==70.1 wheel packaging ninja torch==${{ matrix.torchver }} psutil numpy --extra-index-url "https://download.pytorch.org/whl/cu124"
+          uv pip install --upgrade build setuptools==70.1 wheel packaging ninja psutil numpy
+          uv pip install --upgrade torch==${{ matrix.torchver }} --extra-index-url "https://download.pytorch.org/whl/cu124"
 
       - name: Build Wheel
         id: build-wheel
