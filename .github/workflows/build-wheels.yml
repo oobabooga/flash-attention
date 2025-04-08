@@ -65,6 +65,14 @@ jobs:
           uv pip install --upgrade build setuptools==70.1 wheel packaging ninja psutil numpy
           uv pip install --upgrade torch==${{ matrix.torchver }} --extra-index-url "https://download.pytorch.org/whl/cu124"
 
+      - name: Patch setup.py for Windows compatibility
+        run: |
+          # Replace GCC-style flags with MSVC-style flags in setup.py
+          (Get-Content setup.py) | 
+            ForEach-Object { $_ -replace '"-O3"', '"/O2"' } |
+            ForEach-Object { $_ -replace '"-std=c\+\+17"', '"/std:c++17"' } |
+            Set-Content setup.py
+
       - name: Build Wheel
         id: build-wheel
         run: |
