@@ -38,8 +38,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        #with:
-        #  submodules: 'recursive'
 
       - name: Install VS2022 BuildTools 17.9.7
         run: choco install -y visualstudio2022buildtools --version=117.9.7.0 --params "--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --installChannelUri https://aka.ms/vs/17/release/180911598_-255012421/channel"
@@ -63,8 +61,8 @@ jobs:
           git config --system core.longpaths true
           $cudaVersion = '${{ matrix.cuda }}'
           $cudaVersionPytorch = '${{ matrix.cuda }}'.Remove('${{ matrix.cuda }}'.LastIndexOf('.')).Replace('.','')
-          
-          uv pip install --upgrade build setuptools wheel packaging ninja torch==${{ matrix.torchver }} psutil --extra-index-url "https://download.pytorch.org/whl/cu124"
+
+          uv pip install --upgrade build setuptools==70.1 wheel packaging ninja torch==${{ matrix.torchver }} psutil numpy --extra-index-url "https://download.pytorch.org/whl/cu124"
 
       - name: Build Wheel
         id: build-wheel
@@ -78,21 +76,21 @@ jobs:
 
           $cudaVersion = $env:CUDAVER.Remove($env:CUDAVER.LastIndexOf('.')).Replace('.','')
           $packageVersion = $env:PCKGVER.TrimStart('v')
-          
+
           $env:CUDA_PATH = $env:CONDA_PREFIX
           $env:CUDA_HOME = $env:CONDA_PREFIX
-          
+
           $env:MAX_JOBS = '1'
           $env:FLASH_ATTENTION_FORCE_BUILD = 'TRUE'
           $env:FLASH_ATTENTION_FORCE_CXX11_ABI = 'FALSE'
           $env:BUILD_TARGET = "cuda"
 
           python setup.py bdist_wheel --dist-dir=dist
-          
+
           $wheel = (gi '.\dist\*.whl')[0]
           $wheelname = $wheel.name.replace("flash_attn-$packageVersion-","flash_attn-$packageVersion+cu$cudaVersion"+"torch${{ matrix.torchver }}cxx11abiFALSE-")
           Move-Item $wheel.fullname ".\dist\$wheelname"
-          
+
       - name: Upload files to a GitHub release
         uses: svenstaro/upload-release-action@2.6.1
         continue-on-error: true
