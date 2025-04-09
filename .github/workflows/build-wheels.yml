@@ -65,77 +65,26 @@ jobs:
           uv pip install --upgrade build setuptools==70.1 wheel packaging ninja psutil numpy
           uv pip install --upgrade torch==${{ matrix.torchver }} --extra-index-url "https://download.pytorch.org/whl/cu124"
 
-      - name: Patch setup.py and CUTLASS for Windows compatibility
-        run: |
-          # Fix compiler flags in setup.py
-          (Get-Content setup.py) |
-            ForEach-Object { $_ -replace '"-O3"', '"/O2"' } |
-            ForEach-Object { $_ -replace '"-std=c\+\+17"', '"/std:c++17"' } |
-            Set-Content setup.py
-
-          # Fix CUTLASS platform.h for MSVC compatibility
-          $platformDir = ".\csrc\cutlass\include\cutlass\platform"
-
-          # Create directory if it doesn't exist (in case structure is different)
-          if (-not (Test-Path $platformDir)) {
-            New-Item -ItemType Directory -Path $platformDir -Force | Out-Null
-          }
-
-          $platformFile = "$platformDir\platform.h"
-
-          if (Test-Path $platformFile) {
-            Write-Host "Found platform.h at expected location, patching..."
-            $content = Get-Content $platformFile -Raw
-            # Add MSVC compatibility for is_unsigned_v
-            $newContent = $content -replace "#include <type_traits>", "#include <type_traits>`n#if defined(_MSC_VER)`nnamespace cutlass { namespace platform { template <typename T> constexpr bool is_unsigned_v = std::is_unsigned<T>::value; } }`n#endif"
-            Set-Content -Path $platformFile -Value $newContent
-          } else {
-            # Search for platform.h
-            Write-Host "Searching for platform.h..."
-            $platformFile = Get-ChildItem -Path .\csrc -Recurse -Filter platform.h | Where-Object { $_.FullName -like "*cutlass*" } | Select-Object -First 1
-
-            if ($platformFile) {
-              Write-Host "Found platform.h at: $($platformFile.FullName)"
-              $content = Get-Content $platformFile.FullName -Raw
-              $newContent = $content -replace "#include <type_traits>", "#include <type_traits>`n#if defined(_MSC_VER)`nnamespace cutlass { namespace platform { template <typename T> constexpr bool is_unsigned_v = std::is_unsigned<T>::value; } }`n#endif"
-              Set-Content -Path $platformFile.FullName -Value $newContent
-            } else {
-              Write-Host "platform.h not found, creating compatibility header..."
-              # Create a compatibility header
-              @"
-      #pragma once
-      #include <type_traits>
-
-      namespace cutlass {
-      namespace platform {
-          template <typename T>
-          constexpr bool is_unsigned_v = std::is_unsigned<T>::value;
-      }
-      }
-      "@ | Out-File -FilePath $platformFile -Encoding ASCII
-            }
-          }
-
       - name: Build Wheel
         id: build-wheel
         run: |
           # --- Spawn the VS shell
-          if ($IsWindows) {
-            Import-Module 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
-            Enter-VsDevShell -VsInstallPath 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools' -DevCmdArguments '-arch=x64 -host_arch=x64'
-            $env:DISTUTILS_USE_SDK=1
-          }
+          Import-Module 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
+          Enter-VsDevShell -VsInstallPath 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools' -DevCmdArguments '-arch=x64 -host_arch=x64'
 
-          $cudaVersion = $env:CUDAVER.Remove($env:CUDAVER.LastIndexOf('.')).Replace('.','')
-          $packageVersion = $env:PCKGVER.TrimStart('v')
-
+          $env:DISTUTILS_USE_SDK = '1'
           $env:CUDA_PATH = $env:CONDA_PREFIX
           $env:CUDA_HOME = $env:CONDA_PREFIX
-
           $env:MAX_JOBS = '1'
           $env:FLASH_ATTENTION_FORCE_BUILD = 'TRUE'
           $env:FLASH_ATTENTION_FORCE_CXX11_ABI = 'FALSE'
           $env:BUILD_TARGET = "cuda"
+
+          # This forces proper C++17 standard library features
+          $env:_CL_ = "/std:c++17 /Zc:__cplusplus"
+
+          $cudaVersion = $env:CUDAVER.Remove($env:CUDAVER.LastIndexOf('.')).Replace('.','')
+          $packageVersion = $env:PCKGVER.TrimStart('v')
 
           python setup.py bdist_wheel --dist-dir=dist
 
