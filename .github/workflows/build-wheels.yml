@@ -21,14 +21,31 @@ permissions:
 
 jobs:
   build_wheels:
-    name: Build wheels for Python ${{ matrix.pyver }}, CUDA ${{ matrix.cuda }}, and Torch ${{ matrix.torchver }}
-    runs-on: windows-2022
+    name: Build wheels for OS ${{ matrix.os }}, Python ${{ matrix.pyver }}, CUDA ${{ matrix.cuda }}, and Torch ${{ matrix.torchver }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        pyver: ["3.11"]
-        cuda: ["12.4.1", "12.8.0"]
-        torchver: ["2.7.0"]
+        os: ["windows-2022", "ubuntu-22.04"]
+        pyver: ["3.10", "3.11", "3.12", "3.13"]
+        cuda: ["12.4.1", "12.8.1"]
+        torchver: ["2.5.1", "2.6.0", "2.7.0"]
+        exclude:
+          - os: "windows-2022"
+          - torchver: '2.5.1'
+            pyver: '3.13'
+          - torchver: '2.7.0'
+            cuda: '12.4.1'
+          - torchver: '2.5.1'
+            cuda: '12.8.1'
+          - torchver: '2.6.0'
+            cuda: '12.8.1'
+          - os: 'ubuntu-22.04'
+            torchver: '2.5.1'
+          - os: 'ubuntu-22.04'
+            torchver: '2.6.0'
+          - os: 'ubuntu-22.04'
+            cuda: '12.4.1'
     defaults:
       run:
         shell: pwsh
@@ -38,18 +55,32 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        #with:
+        #  submodules: 'recursive'
 
       - name: Install VS2022 BuildTools 17.9.7
         run: choco install -y visualstudio2022buildtools --version=117.9.7.0 --params "--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --installChannelUri https://aka.ms/vs/17/release/180911598_-255012421/channel"
         if: runner.os == 'Windows'
 
-      - name: Install CUDA ${{ matrix.cuda }}
-        uses: Jimver/cuda-toolkit@v0.2.19
-        id: cuda-toolkit
+      - name: Install Windows CUDA ${{ matrix.cuda }}
+        uses: Jimver/cuda-toolkit@v0.2.23
+        id: cuda-toolkit-win
         with:
           cuda: "${{ matrix.cuda }}"
           method: "network"
           sub-packages: '["nvcc", "cudart", "cublas", "cufft", "curand", "cusolver", "cusparse", "visual_studio_integration"]'
+        if: runner.os == 'Windows'
+
+      # From FA2 repo
+      - name: Install Linux CUDA ${{ matrix.cuda }}
+        uses: Jimver/cuda-toolkit@v0.2.23
+        id: cuda-toolkit-Linux
+        with:
+          cuda: "${{ matrix.cuda }}"
+          linux-local-args: '["--toolkit"]'
+          method: "network"
+          sub-packages: '["nvcc"]'
+        if: runner.os != 'Windows'
 
       - name: Install the latest version of uv and set the python version
         uses: astral-sh/setup-uv@v5
@@ -61,37 +92,37 @@ jobs:
           git config --system core.longpaths true
           $cudaVersion = '${{ matrix.cuda }}'
           $cudaVersionPytorch = '${{ matrix.cuda }}'.Remove('${{ matrix.cuda }}'.LastIndexOf('.')).Replace('.','')
+          $pytorchIndexUrl = "https://download.pytorch.org/whl/cu$cudaVersionPytorch"
 
-          uv pip install --upgrade build setuptools==70.1 wheel packaging ninja psutil numpy
-          uv pip install --upgrade torch==${{ matrix.torchver }} --extra-index-url "https://download.pytorch.org/whl/cu124"
+          uv pip install --upgrade build setuptools wheel packaging ninja torch==${{ matrix.torchver }} psutil --extra-index-url $pytorchIndexUrl
 
       - name: Build Wheel
         id: build-wheel
         run: |
           # --- Spawn the VS shell
-          Import-Module 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
-          Enter-VsDevShell -VsInstallPath 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools' -DevCmdArguments '-arch=x64 -host_arch=x64'
+          if ($IsWindows) {
+            Import-Module 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Microsoft.VisualStudio.DevShell.dll'
+            Enter-VsDevShell -VsInstallPath 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools' -DevCmdArguments '-arch=x64 -host_arch=x64'
+            $env:DISTUTILS_USE_SDK=1
+          }
 
-          $env:DISTUTILS_USE_SDK = '1'
+          $cudaVersion = $env:CUDAVER.Remove($env:CUDAVER.LastIndexOf('.')).Replace('.','')
+          $packageVersion = $env:PCKGVER.TrimStart('v')
+          
           $env:CUDA_PATH = $env:CONDA_PREFIX
           $env:CUDA_HOME = $env:CONDA_PREFIX
+          
           $env:MAX_JOBS = '1'
           $env:FLASH_ATTENTION_FORCE_BUILD = 'TRUE'
           $env:FLASH_ATTENTION_FORCE_CXX11_ABI = 'FALSE'
           $env:BUILD_TARGET = "cuda"
 
-          # This forces proper C++17 standard library features
-          $env:_CL_ = "/std:c++17 /Zc:__cplusplus"
-
-          $cudaVersion = $env:CUDAVER.Remove($env:CUDAVER.LastIndexOf('.')).Replace('.','')
-          $packageVersion = $env:PCKGVER.TrimStart('v')
-
           python setup.py bdist_wheel --dist-dir=dist
-
+          
           $wheel = (gi '.\dist\*.whl')[0]
           $wheelname = $wheel.name.replace("flash_attn-$packageVersion-","flash_attn-$packageVersion+cu$cudaVersion"+"torch${{ matrix.torchver }}cxx11abiFALSE-")
           Move-Item $wheel.fullname ".\dist\$wheelname"
-
+          
       - name: Upload files to a GitHub release
         uses: svenstaro/upload-release-action@2.6.1
         continue-on-error: true
