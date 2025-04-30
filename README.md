@@ -1,3 +1,6 @@
+# Windows compilation workflow by [jllllll](https://github.com/jllllll/flash-attention), with changes by [bdashore3](https://github.com/bdashore3/flash-attention)
+
+----
 # FlashAttention
 This repository provides the official implementation of FlashAttention and
 FlashAttention-2 from the
@@ -44,7 +47,7 @@ Currently released:
 
 Requirements: H100 / H800 GPU, CUDA >= 12.3.
 
-For now, we highly recommend CUDA 12.3 for best performance.
+We highly recommend CUDA 12.8 for best performance.
 
 To install:
 ```sh
